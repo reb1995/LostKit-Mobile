@@ -2,17 +2,18 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:gal/gal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:vibration/vibration.dart';
 import '../core/feature_registry.dart';
+import '../core/tool_defs.dart';
 import '../features/world_switcher/world_switcher_feature.dart';
 import '../features/hiscores/hiscores_feature.dart';
 import '../features/zoom/zoom_feature.dart';
 import '../features/afk_timer/afk_timer_feature.dart';
+import '../features/settings/settings_feature.dart';
 import '../widgets/side_panel_drawer.dart';
 
 class GameScreen extends StatefulWidget {
@@ -34,42 +35,28 @@ class _GameScreenState extends State<GameScreen> {
   int    _loadGen           = 0;
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
+  // index 0 = game, 1..N = visible web tools (see _visibleTools).
   int  _activeTab    = 0;
   bool _tabsVisible  = true;
   bool _rightVisible = true;
 
-  // Per-tab zoom — index matches tab number
-  final List<double> _tabZoom = [1.20, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
-  static const List<String> _tabZoomKeys = [
-    'zoom_game',
-    'zoom_coords',
-    'zoom_clues',
-    'zoom_map',
-    'zoom_markets',
-    'zoom_quests',
-    'zoom_calcs',
-    'zoom_lclab',
-  ];
+  // Which tools are shown in the side list (by ToolDef.id). Default = all.
+  Set<String> _visibleToolIds = kWebTools.map((t) => t.id).toSet();
 
-  double get _currentZoom => _tabZoom[_activeTab];
+  // Per-tool zoom keyed by tool id ('game' for the game tab).
+  final Map<String, double> _zoom = {};
 
-  // Controllers for tabs 1–7
-  InAppWebViewController? _coordsController;
-  InAppWebViewController? _cluesController;
-  InAppWebViewController? _mapController;
-  InAppWebViewController? _marketsController;
-  InAppWebViewController? _questsController;
-  InAppWebViewController? _calcsController;
-  InAppWebViewController? _lclabController;
+  List<ToolDef> get _visibleTools =>
+      kWebTools.where((t) => _visibleToolIds.contains(t.id)).toList();
 
-  // Loading states for tabs 1–7
-  bool _coordsLoading  = false;
-  bool _cluesLoading   = false;
-  bool _mapLoading     = false;
-  bool _marketsLoading = false;
-  bool _questsLoading  = false;
-  bool _calcsLoading   = false;
-  bool _lclabLoading   = false;
+  String get _activeToolId =>
+      _activeTab == 0 ? 'game' : _visibleTools[_activeTab - 1].id;
+
+  double _zoomFor(String id) => _zoom[id] ?? kDefaultZoom[id] ?? 1.0;
+
+  // Per-tool WebView controllers + loading states (keyed by tool id).
+  final Map<String, InAppWebViewController?> _toolControllers = {};
+  final Map<String, bool> _toolLoading = {};
 
   // ── Ping ──────────────────────────────────────────────────────────────────
   int?   _pingMs;
@@ -125,7 +112,7 @@ class _GameScreenState extends State<GameScreen> {
   static String _zoomJS(double zoom) =>
       "document.documentElement.style.setProperty('zoom', '$zoom', 'important');";
 
-  // ── Pinch-to-wheel + single-finger pan JS (Coords tab — Leaflet map) ────────
+  // ── Pinch-to-wheel + single-finger pan JS (Leaflet-style maps) ──────────────
   // Two fingers  → WheelEvent (zoom in/out)
   // One finger   → mousedown/mousemove/mouseup (pan the map)
   static const String _pinchToWheelJS = r'''
@@ -219,68 +206,6 @@ class _GameScreenState extends State<GameScreen> {
     })();
   ''';
 
-  // ── Touch-to-mouse JS (Clues tab — Treasure V2 puzzle) ───────────────────
-  // The puzzle solver uses a Canvas with mousedown/mousemove/mouseup listeners.
-  // We translate touch events to mouse events in canvas pixel space.
-  //
-  // KEY: use (canvas.width / rect.width) as the scale factor.
-  // rect is in viewport pixels (affected by CSS zoom).
-  // canvas.width is in canvas logical pixels (never changes).
-  // Their ratio converts any viewport offset to canvas pixel space exactly,
-  // regardless of what CSS zoom level is currently applied.
-  // This fixes both the coordinate offset AND the disappearing tile issues.
-  static const String _touchDragJS = r'''
-    (function() {
-      if (window._touchMouseActive) return;
-      window._touchMouseActive = true;
-
-      function canvasMouseEvt(type, touch, canvas) {
-        var rect = canvas.getBoundingClientRect();
-        // Scale factor: canvas logical pixels / rendered viewport pixels
-        var sx = canvas.width  / rect.width;
-        var sy = canvas.height / rect.height;
-        // Convert touch viewport coords to canvas pixel coords,
-        // then express as clientX so getMouseTile() computes correctly:
-        //   getMouseTile: x = (e.clientX - rect.left) / tileSize
-        //   mouseX:       e.clientX - rect.left  (for floating tile draw)
-        // Both expect e.clientX - rect.left to be in canvas pixel space.
-        var cx = rect.left + (touch.clientX - rect.left) * sx;
-        var cy = rect.top  + (touch.clientY - rect.top)  * sy;
-        return new MouseEvent(type, {
-          bubbles: true, cancelable: true, view: window,
-          clientX: cx, clientY: cy,
-          screenX: touch.screenX, screenY: touch.screenY,
-        });
-      }
-
-      function attachToCanvases() {
-        document.querySelectorAll('canvas').forEach(function(canvas) {
-          if (canvas._touchMouseBound) return;
-          canvas._touchMouseBound = true;
-
-          canvas.addEventListener('touchstart', function(e) {
-            e.preventDefault();
-            canvas.dispatchEvent(canvasMouseEvt('mousedown', e.touches[0], canvas));
-          }, { passive: false });
-
-          canvas.addEventListener('touchmove', function(e) {
-            e.preventDefault();
-            canvas.dispatchEvent(canvasMouseEvt('mousemove', e.touches[0], canvas));
-          }, { passive: false });
-
-          canvas.addEventListener('touchend', function(e) {
-            e.preventDefault();
-            canvas.dispatchEvent(canvasMouseEvt('mouseup', e.changedTouches[0], canvas));
-          }, { passive: false });
-        });
-      }
-
-      attachToCanvases();
-      setTimeout(attachToCanvases, 800);
-      setTimeout(attachToCanvases, 2000);
-    })();
-  ''';
-
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   @override
@@ -317,15 +242,23 @@ class _GameScreenState extends State<GameScreen> {
     final afkSound      = prefs.getBool('afk_sound')      ?? true;
     final afkVibration  = prefs.getBool('afk_vibration')  ?? true;
 
+    final savedVisible = prefs.getStringList('visible_tools');
+
     if (mounted) {
       setState(() {
         if (url != null && label != null) {
           _currentUrl        = url;
           _currentWorldLabel = label;
         }
-        // Load per-tab zoom values (keeps defaults if not yet saved)
-        for (int i = 0; i < _tabZoomKeys.length; i++) {
-          _tabZoom[i] = prefs.getDouble(_tabZoomKeys[i]) ?? _tabZoom[i];
+        // Visible tools (only keep ids that still exist in the master list)
+        if (savedVisible != null) {
+          final valid = kWebTools.map((t) => t.id).toSet();
+          _visibleToolIds = savedVisible.where(valid.contains).toSet();
+        }
+        // Per-tool zoom values
+        _zoom['game'] = prefs.getDouble('zoom_game') ?? kDefaultZoom['game']!;
+        for (final t in kWebTools) {
+          _zoom[t.id] = prefs.getDouble('zoom_${t.id}') ?? 1.0;
         }
         _afkSettings = AfkTimerSettings(
           enabled          : false, // always off on startup
@@ -335,6 +268,7 @@ class _GameScreenState extends State<GameScreen> {
           durationSeconds  : 90,
         );
         _afkRemaining = _afkSettings.durationSeconds;
+        _activeTab = _activeTab.clamp(0, _visibleTools.length);
       });
       _registerFeatures();
     }
@@ -361,12 +295,16 @@ class _GameScreenState extends State<GameScreen> {
       WorldSwitcherFeature(onWorldSelected: _onWorldSelected),
       HiscoresFeature(),
       ZoomFeature(
-        currentZoom   : _currentZoom,
+        currentZoom   : _zoomFor(_activeToolId),
         onZoomChanged : _onZoomChanged,
       ),
       AfkTimerFeature(
         settings         : _afkSettings,
         onSettingsChanged: _onAfkSettingsChanged,
+      ),
+      SettingsFeature(
+        visibleIds: _visibleToolIds,
+        onChanged : _onToolsChanged,
       ),
     ]);
   }
@@ -382,10 +320,27 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   void _onZoomChanged(double zoom) async {
-    setState(() => _tabZoom[_activeTab] = zoom);
+    final id = _activeToolId;
+    setState(() => _zoom[id] = zoom);
     _controllerForTab(_activeTab)?.evaluateJavascript(source: _zoomJS(zoom));
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble(_tabZoomKeys[_activeTab], zoom);
+    await prefs.setDouble('zoom_$id', zoom);
+    _registerFeatures();
+  }
+
+  Future<void> _onToolsChanged(Set<String> ids) async {
+    final activeId = _activeToolId;
+    setState(() {
+      _visibleToolIds = ids;
+      // If the active tool was just hidden, fall back to the game tab.
+      if (activeId != 'game' && !ids.contains(activeId)) {
+        _activeTab = 0;
+      } else {
+        _activeTab = _activeTab.clamp(0, _visibleTools.length);
+      }
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('visible_tools', ids.toList());
     _registerFeatures();
   }
 
@@ -412,17 +367,10 @@ class _GameScreenState extends State<GameScreen> {
   // ── Tab helpers ───────────────────────────────────────────────────────────
 
   InAppWebViewController? _controllerForTab(int tab) {
-    switch (tab) {
-      case 0: return _webViewController;
-      case 1: return _coordsController;
-      case 2: return _cluesController;
-      case 3: return _mapController;
-      case 4: return _marketsController;
-      case 5: return _questsController;
-      case 6: return _calcsController;
-      case 7: return _lclabController;
-      default: return null;
-    }
+    if (tab == 0) return _webViewController;
+    final tools = _visibleTools;
+    if (tab - 1 < tools.length) return _toolControllers[tools[tab - 1].id];
+    return null;
   }
 
   void _switchTab(int index) {
@@ -430,7 +378,7 @@ class _GameScreenState extends State<GameScreen> {
     // Re-apply saved zoom after frame so the WebView has had a chance to settle
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controllerForTab(index)
-          ?.evaluateJavascript(source: _zoomJS(_tabZoom[index]));
+          ?.evaluateJavascript(source: _zoomJS(_zoomFor(_activeToolId)));
     });
     _registerFeatures();
   }
@@ -546,12 +494,12 @@ class _GameScreenState extends State<GameScreen> {
 
       final ready = await ctrl.evaluateJavascript(source: 'window._lkReady === true;');
       if (ready == true || ready == 'true') {
-        await ctrl.evaluateJavascript(source: _zoomJS(_tabZoom[0]));
+        await ctrl.evaluateJavascript(source: _zoomJS(_zoomFor('game')));
         if (mounted && _loadGen == gen) setState(() => _pageLoading = false);
         return;
       }
     }
-    await ctrl.evaluateJavascript(source: _zoomJS(_tabZoom[0]));
+    await ctrl.evaluateJavascript(source: _zoomJS(_zoomFor('game')));
     if (mounted && _loadGen == gen) setState(() => _pageLoading = false);
   }
 
@@ -600,10 +548,41 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
+  // ── Tool WebView builder ────────────────────────────────────────────────────
+
+  Widget _buildToolWebView(ToolDef tool) {
+    return InAppWebView(
+      key: ValueKey('tool_${tool.id}'),
+      initialUrlRequest: URLRequest(url: WebUri(tool.url)),
+      initialSettings: InAppWebViewSettings(
+        javaScriptEnabled         : true,
+        useHybridComposition      : true,
+        supportZoom               : !tool.pinch, // pinch tools use our JS instead
+        builtInZoomControls       : false,
+        displayZoomControls       : false,
+        horizontalScrollBarEnabled: false,
+        verticalScrollBarEnabled  : false,
+      ),
+      onWebViewCreated: (c) => _toolControllers[tool.id] = c,
+      onLoadStart: (c, _) {
+        if (mounted) setState(() => _toolLoading[tool.id] = true);
+      },
+      onLoadStop: (c, _) {
+        if (mounted) setState(() => _toolLoading[tool.id] = false);
+        c.evaluateJavascript(source: _zoomJS(_zoomFor(tool.id)));
+        if (tool.pinch) c.evaluateJavascript(source: _pinchToWheelJS);
+      },
+      onReceivedError: (c, _, __) {
+        if (mounted) setState(() => _toolLoading[tool.id] = false);
+      },
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    final tools = _visibleTools;
     return Scaffold(
       key: _scaffoldKey,
       resizeToAvoidBottomInset: true,
@@ -614,7 +593,7 @@ class _GameScreenState extends State<GameScreen> {
 
           // ── All tabs always mounted — game runs in background ──────
           IndexedStack(
-            index: _activeTab,
+            index: _activeTab.clamp(0, tools.length),
             children: [
 
               // ── Tab 0: Game ────────────────────────────────────────
@@ -652,201 +631,14 @@ class _GameScreenState extends State<GameScreen> {
                 ),
               ),
 
-              // ── Tab 1: Coordinates ─────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://tools.losthq.rs/cluecoordinator/')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : false,  // disable native pinch — our JS handles it
-                  builtInZoomControls       : false,
-                  displayZoomControls       : false,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _coordsController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _coordsLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _coordsLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[1]));
-                  c.evaluateJavascript(source: _pinchToWheelJS);
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _coordsLoading = false);
-                },
-              ),
-
-              // ── Tab 2: Clues ───────────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://razgals.github.io/Treasure-V2/')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : true,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _cluesController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _cluesLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _cluesLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[2]));
-                  c.evaluateJavascript(source: _touchDragJS);
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _cluesLoading = false);
-                },
-              ),
-
-              // ── Tab 3: Map ─────────────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://2004.lostcity.rs/worldmap')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : true,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _mapController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _mapLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _mapLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[3]));
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _mapLoading = false);
-                },
-              ),
-
-              // ── Tab 4: Markets ─────────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://markets.lostcity.rs')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : true,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _marketsController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _marketsLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _marketsLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[4]));
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _marketsLoading = false);
-                },
-              ),
-
-              // ── Tab 5: Quests ──────────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://2004.losthq.rs/?p=questguides')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : true,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _questsController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _questsLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _questsLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[5]));
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _questsLoading = false);
-                },
-              ),
-
-              // ── Tab 6: Calcs ───────────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://2004.losthq.rs/?p=calculators')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : true,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _calcsController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _calcsLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _calcsLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[6]));
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _calcsLoading = false);
-                },
-              ),
-
-              // ── Tab 7: LC Lab ──────────────────────────────────────
-              InAppWebView(
-                initialUrlRequest: URLRequest(
-                    url: WebUri('https://www.lostcitylabs.com')),
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled         : true,
-                  useHybridComposition      : true,
-                  supportZoom               : true,
-                  horizontalScrollBarEnabled: false,
-                  verticalScrollBarEnabled  : false,
-                ),
-                onWebViewCreated: (c) => _lclabController = c,
-                onLoadStart: (c, _) {
-                  if (mounted) setState(() => _lclabLoading = true);
-                },
-                onLoadStop: (c, _) {
-                  if (mounted) setState(() => _lclabLoading = false);
-                  c.evaluateJavascript(source: _zoomJS(_tabZoom[7]));
-                },
-                onReceivedError: (c, _, __) {
-                  if (mounted) setState(() => _lclabLoading = false);
-                },
-              ),
+              // ── Tabs 1..N: web tools (data-driven) ─────────────────
+              for (final tool in tools) _buildToolWebView(tool),
             ],
           ),
 
           // ── Game loading overlay (tab 0 only) ─────────────────────
           if (_pageLoading && _activeTab == 0)
-            Container(
-              color: const Color(0xFF000000),
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const CircularProgressIndicator(color: Color(0xFFCC0000)),
-                    const SizedBox(height: 16),
-                    const Text('Loading game...',
-                        style: TextStyle(fontFamily: 'RuneScape',
-                            color: Color(0xFFC8A450), fontSize: 14, letterSpacing: 1)),
-                    const SizedBox(height: 8),
-                    Text(_currentWorldLabel,
-                        style: const TextStyle(fontFamily: 'RuneScape',
-                            color: Color(0xFF666666), fontSize: 11)),
-                  ],
-                ),
-              ),
-            ),
+            _GameLoadingOverlay(worldLabel: _currentWorldLabel),
 
           // ── Screenshot flash overlay ───────────────────────────────
           if (_screenshotFlash)
@@ -945,7 +737,7 @@ class _GameScreenState extends State<GameScreen> {
                     alignment: Alignment.topLeft,
                     child: _tabsVisible
                         ? ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 300),
+                            constraints: const BoxConstraints(maxHeight: 320),
                             child: SingleChildScrollView(
                               physics: const BouncingScrollPhysics(),
                               child: Column(
@@ -960,55 +752,18 @@ class _GameScreenState extends State<GameScreen> {
                                     active: _activeTab == 0,
                                     onTap : () => _switchTab(0),
                                   ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/coordinates.png',
-                                    active : _activeTab == 1,
-                                    loading: _coordsLoading && _activeTab == 1,
-                                    onTap  : () => _switchTab(1),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/cluehelp.png',
-                                    active : _activeTab == 2,
-                                    loading: _cluesLoading && _activeTab == 2,
-                                    onTap  : () => _switchTab(2),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/worldmap.png',
-                                    active : _activeTab == 3,
-                                    loading: _mapLoading && _activeTab == 3,
-                                    onTap  : () => _switchTab(3),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/market.png',
-                                    active : _activeTab == 4,
-                                    loading: _marketsLoading && _activeTab == 4,
-                                    onTap  : () => _switchTab(4),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/quests.png',
-                                    active : _activeTab == 5,
-                                    loading: _questsLoading && _activeTab == 5,
-                                    onTap  : () => _switchTab(5),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/skillscalculator.png',
-                                    active : _activeTab == 6,
-                                    loading: _calcsLoading && _activeTab == 6,
-                                    onTap  : () => _switchTab(6),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  _IconTabBtn(
-                                    asset  : 'assets/widgets/lcl.png',
-                                    active : _activeTab == 7,
-                                    loading: _lclabLoading && _activeTab == 7,
-                                    onTap  : () => _switchTab(7),
-                                  ),
+
+                                  // Data-driven tool buttons
+                                  for (int i = 0; i < tools.length; i++) ...[
+                                    const SizedBox(height: 2),
+                                    _IconTabBtn(
+                                      asset  : tools[i].iconAsset,
+                                      active : _activeTab == i + 1,
+                                      loading: (_toolLoading[tools[i].id] ?? false) &&
+                                          _activeTab == i + 1,
+                                      onTap  : () => _switchTab(i + 1),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
@@ -1099,6 +854,90 @@ class _GameScreenState extends State<GameScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Game loading overlay ───────────────────────────────────────────────────────
+
+class _GameLoadingOverlay extends StatelessWidget {
+  final String worldLabel;
+  const _GameLoadingOverlay({required this.worldLabel});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      // Subtle radial vignette over black so it doesn't look flat/naked.
+      decoration: const BoxDecoration(
+        gradient: RadialGradient(
+          radius: 0.9,
+          colors: [Color(0xFF161208), Color(0xFF000000)],
+        ),
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.asset(
+              'assets/losthqlogo.png',
+              width: 150,
+              height: 75,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => const Text(
+                'LostHQ',
+                style: TextStyle(
+                  fontFamily: 'RuneScape',
+                  fontSize: 28,
+                  color: Color(0xFFC8A450),
+                  letterSpacing: 4,
+                ),
+              ),
+            ),
+            const SizedBox(height: 22),
+            const SizedBox(
+              width: 30,
+              height: 30,
+              child: CircularProgressIndicator(
+                color: Color(0xFFCC0000),
+                strokeWidth: 2.5,
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              'Loading game...',
+              style: TextStyle(
+                fontFamily: 'RuneScape',
+                color: Color(0xFFC8A450),
+                fontSize: 14,
+                letterSpacing: 1,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              worldLabel,
+              style: const TextStyle(
+                fontFamily: 'RuneScape',
+                color: Color(0xFF666666),
+                fontSize: 11,
+                letterSpacing: 1,
+              ),
+            ),
+            const SizedBox(height: 18),
+            // Thin red progress bar to echo the splash screen.
+            Container(
+              width: 180,
+              height: 4,
+              color: const Color(0xFF1A0000),
+              child: const LinearProgressIndicator(
+                backgroundColor: Color(0xFF1A0000),
+                valueColor:
+                    AlwaysStoppedAnimation<Color>(Color(0xFFCC0000)),
+                minHeight: 4,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

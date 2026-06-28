@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -48,10 +49,31 @@ class _WorldSwitcherPanelState extends State<WorldSwitcherPanel> {
   bool _membersOnly = true;
   bool _highDetail = true;
 
+  // Live ping — re-measure latency for every world on a short interval so the
+  // numbers stay real-time (like the ping shown next to the hamburger button).
+  Timer? _pingTimer;
+  static const Duration _pingInterval = Duration(seconds: 4);
+
   @override
   void initState() {
     super.initState();
     _loadWorlds();
+  }
+
+  @override
+  void dispose() {
+    _pingTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startLivePing() {
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(_pingInterval, (_) {
+      if (!mounted) return;
+      for (final world in _worlds) {
+        _measureLatency(world);
+      }
+    });
   }
 
   Future<void> _loadWorlds() async {
@@ -72,6 +94,7 @@ class _WorldSwitcherPanelState extends State<WorldSwitcherPanel> {
         for (final world in _worlds) {
           _measureLatency(world);
         }
+        _startLivePing();
       } else {
         throw Exception();
       }
