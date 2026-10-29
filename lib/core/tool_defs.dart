@@ -60,12 +60,6 @@ const List<ToolDef> kWebTools = [
     url: 'https://2004.losthq.rs/?p=droptables',
   ),
   ToolDef(
-    id: 'markets',
-    label: 'Markets',
-    iconAsset: 'assets/widgets/market.png',
-    url: 'https://markets.lostcity.rs',
-  ),
-  ToolDef(
     id: 'quests',
     label: 'Quest Guides',
     iconAsset: 'assets/widgets/quests.png',
@@ -76,12 +70,6 @@ const List<ToolDef> kWebTools = [
     label: 'Skills Calculator',
     iconAsset: 'assets/widgets/skillscalculator.png',
     url: 'https://2004.losthq.rs/?p=calculators',
-  ),
-  ToolDef(
-    id: 'lcl',
-    label: 'Lost City Labs',
-    iconAsset: 'assets/widgets/lcl.png',
-    url: 'https://www.lostcitylabs.com',
   ),
 ];
 

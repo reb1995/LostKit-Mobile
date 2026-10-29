@@ -9,7 +9,6 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:vibration/vibration.dart';
 import '../core/feature_registry.dart';
 import '../core/tool_defs.dart';
-import '../features/world_switcher/world_switcher_feature.dart';
 import '../features/hiscores/hiscores_feature.dart';
 import '../features/zoom/zoom_feature.dart';
 import '../features/afk_timer/afk_timer_feature.dart';
@@ -28,8 +27,8 @@ class _GameScreenState extends State<GameScreen> {
 
   // ── Game WebView ───────────────────────────────────────────────────────────
   InAppWebViewController? _webViewController;
-  String _currentUrl        = 'https://2004.lostcity.rs/client?world=2&detail=high&method=0';
-  String _currentWorldLabel = 'W2 HD';
+  String _currentUrl        = 'https://lostcity.rebserver.com/rs2.cgi';
+  String _currentWorldLabel = 'LostCity';
   bool   _pageLoading       = true;
   bool   _screenshotFlash   = false;
   int    _loadGen           = 0;
@@ -61,7 +60,7 @@ class _GameScreenState extends State<GameScreen> {
   // ── Ping ──────────────────────────────────────────────────────────────────
   int?   _pingMs;
   Timer? _pingTimer;
-  static const String _pingHost = 'https://2004.lostcity.rs/';
+  static const String _pingHost = 'https://lostcity.rebserver.com/rs2.cgi';
 
   // ── AFK Timer ─────────────────────────────────────────────────────────────
   AfkTimerSettings _afkSettings = const AfkTimerSettings();
@@ -235,8 +234,6 @@ class _GameScreenState extends State<GameScreen> {
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    final url   = prefs.getString('last_world_url');
-    final label = prefs.getString('last_world_label');
 
     final afkThreshold  = prefs.getInt('afk_threshold')  ?? 10;
     final afkSound      = prefs.getBool('afk_sound')      ?? true;
@@ -246,10 +243,7 @@ class _GameScreenState extends State<GameScreen> {
 
     if (mounted) {
       setState(() {
-        if (url != null && label != null) {
-          _currentUrl        = url;
-          _currentWorldLabel = label;
-        }
+        _currentWorldLabel = 'LostCity';
         // Visible tools (only keep ids that still exist in the master list)
         if (savedVisible != null) {
           final valid = kWebTools.map((t) => t.id).toSet();
@@ -274,11 +268,11 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  Future<void> _saveLastWorld(String url, String label) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('last_world_url',   url);
-    await prefs.setString('last_world_label', label);
-  }
+  // Future<void> _saveLastWorld(String url, String label) async {
+  //   final prefs = await SharedPreferences.getInstance();
+  //   await prefs.setString('last_world_url',   url);
+  //   await prefs.setString('last_world_label', label);
+  // }
 
   Future<void> _saveAfkSettings(AfkTimerSettings s) async {
     final prefs = await SharedPreferences.getInstance();
@@ -292,7 +286,6 @@ class _GameScreenState extends State<GameScreen> {
   void _registerFeatures() {
     FeatureRegistry.features.clear();
     FeatureRegistry.registerAll([
-      WorldSwitcherFeature(onWorldSelected: _onWorldSelected),
       HiscoresFeature(),
       ZoomFeature(
         currentZoom   : _zoomFor(_activeToolId),
@@ -309,15 +302,15 @@ class _GameScreenState extends State<GameScreen> {
     ]);
   }
 
-  void _onWorldSelected(String url, String label) {
-    _saveLastWorld(url, label);
-    setState(() {
-      _currentUrl        = url;
-      _currentWorldLabel = label;
-      _pageLoading       = true;
-    });
-    _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
-  }
+  // void _onWorldSelected(String url, String label) {
+  //   _saveLastWorld(url, label);
+  //   setState(() {
+  //     _currentUrl        = url;
+  //     _currentWorldLabel = label;
+  //     _pageLoading       = true;
+  //   });
+  //   _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+  // }
 
   void _onZoomChanged(double zoom) async {
     final id = _activeToolId;
