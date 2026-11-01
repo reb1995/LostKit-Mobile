@@ -8,8 +8,15 @@ typedef OnToolsChanged = void Function(Set<String> visibleIds);
 class SettingsFeature extends AppFeature {
   final Set<String> visibleIds;
   final OnToolsChanged onChanged;
+  final String customUrl;
+  final ValueChanged<String> onCustomUrlChanged;
 
-  SettingsFeature({required this.visibleIds, required this.onChanged});
+  SettingsFeature({
+    required this.visibleIds,
+    required this.onChanged,
+    required this.customUrl,
+    required this.onCustomUrlChanged,
+  });
 
   @override
   String get title => 'Settings';
@@ -18,18 +25,30 @@ class SettingsFeature extends AppFeature {
 
   @override
   Widget buildPanel(BuildContext context, VoidCallback onClose) {
-    return SettingsPanel(visibleIds: visibleIds, onChanged: onChanged);
+    return SettingsPanel(
+      visibleIds: visibleIds,
+      onChanged: onChanged,
+      customUrl: customUrl,
+      onCustomUrlChanged: (url) {
+        onCustomUrlChanged(url);
+        onClose();
+      },
+    );
   }
 }
 
 class SettingsPanel extends StatefulWidget {
   final Set<String> visibleIds;
   final OnToolsChanged onChanged;
+  final String customUrl;
+  final ValueChanged<String> onCustomUrlChanged;
 
   const SettingsPanel({
     super.key,
     required this.visibleIds,
     required this.onChanged,
+    required this.customUrl,
+    required this.onCustomUrlChanged,
   });
 
   @override
@@ -38,11 +57,19 @@ class SettingsPanel extends StatefulWidget {
 
 class _SettingsPanelState extends State<SettingsPanel> {
   late Set<String> _visible;
+  late final TextEditingController _urlController =
+      TextEditingController(text: widget.customUrl);
 
   @override
   void initState() {
     super.initState();
     _visible = {...widget.visibleIds};
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
   }
 
   void _toggle(String id) {
@@ -61,6 +88,74 @@ class _SettingsPanelState extends State<SettingsPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(10, 10, 10, 4),
+          child: Text(
+            'SERVER URL',
+            style: TextStyle(
+              fontFamily: 'RuneScape',
+              color: Color(0xFFC8A450),
+              fontSize: 11,
+              letterSpacing: 2,
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Container(
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D0D0D),
+                    border: Border.all(color: const Color(0xFF443818)),
+                  ),
+                  child: TextField(
+                    controller: _urlController,
+                    style: const TextStyle(
+                      fontFamily: 'RuneScape',
+                      color: Color(0xFFE0D5A0),
+                      fontSize: 11,
+                    ),
+                    decoration: const InputDecoration(
+                      hintText: 'https://...',
+                      hintStyle: TextStyle(
+                        fontFamily: 'RuneScape',
+                        color: Color(0xFF555555),
+                        fontSize: 11,
+                      ),
+                      isDense: true,
+                      border: InputBorder.none,
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: () => widget.onCustomUrlChanged(_urlController.text.trim()),
+                child: Container(
+                  height: 32,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  color: const Color(0xFFCC0000),
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'Save',
+                    style: TextStyle(
+                      fontFamily: 'RuneScape',
+                      color: Colors.white,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Divider(color: Color(0xFF222222), height: 1),
         const Padding(
           padding: EdgeInsets.fromLTRB(10, 10, 10, 4),
           child: Text(
@@ -86,15 +181,22 @@ class _SettingsPanelState extends State<SettingsPanel> {
         ),
         const Divider(color: Color(0xFF222222), height: 1),
         Expanded(
-          child: ListView.separated(
-            padding: EdgeInsets.zero,
-            itemCount: kWebTools.length,
-            separatorBuilder: (_, __) =>
-                const Divider(color: Color(0xFF1C1C1C), height: 1),
-            itemBuilder: (ctx, i) {
-              final tool = kWebTools[i];
-              final on = _visible.contains(tool.id);
-              return InkWell(
+          child: Builder(
+            builder: (ctx) {
+              final tools = widget.customUrl.isNotEmpty
+                  ? kWebTools
+                      .where((t) => t.id != 'markets' && t.id != 'lcl')
+                      .toList()
+                  : kWebTools;
+              return ListView.separated(
+                padding: EdgeInsets.zero,
+                itemCount: tools.length,
+                separatorBuilder: (_, __) =>
+                    const Divider(color: Color(0xFF1C1C1C), height: 1),
+                itemBuilder: (ctx, i) {
+                  final tool = tools[i];
+                  final on = _visible.contains(tool.id);
+                  return InkWell(
                 onTap: () => _toggle(tool.id),
                 splashColor: const Color(0x22CC0000),
                 highlightColor: const Color(0x11CC0000),
@@ -135,10 +237,12 @@ class _SettingsPanelState extends State<SettingsPanel> {
                 ),
               );
             },
-          ),
-        ),
-      ],
-    );
+          );
+        },
+      ),
+    ),
+  ],
+);
   }
 }
 

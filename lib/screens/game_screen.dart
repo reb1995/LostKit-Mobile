@@ -30,6 +30,7 @@ class _GameScreenState extends State<GameScreen> {
   InAppWebViewController? _webViewController;
   String _currentUrl        = 'https://2004.lostcity.rs/client?world=2&detail=high&method=0';
   String _currentWorldLabel = 'W2 HD';
+  String _customUrl         = '';
   bool   _pageLoading       = true;
   bool   _screenshotFlash   = false;
   int    _loadGen           = 0;
@@ -46,8 +47,12 @@ class _GameScreenState extends State<GameScreen> {
   // Per-tool zoom keyed by tool id ('game' for the game tab).
   final Map<String, double> _zoom = {};
 
-  List<ToolDef> get _visibleTools =>
-      kWebTools.where((t) => _visibleToolIds.contains(t.id)).toList();
+  List<ToolDef> get _visibleTools => kWebTools.where((t) {
+        if (_customUrl.isNotEmpty && (t.id == 'markets' || t.id == 'lcl')) {
+          return false;
+        }
+        return _visibleToolIds.contains(t.id);
+      }).toList();
 
   String get _activeToolId =>
       _activeTab == 0 ? 'game' : _visibleTools[_activeTab - 1].id;
@@ -235,6 +240,7 @@ class _GameScreenState extends State<GameScreen> {
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
+    final custom = prefs.getString('custom_server_url') ?? '';
     final url   = prefs.getString('last_world_url');
     final label = prefs.getString('last_world_label');
 
@@ -246,7 +252,11 @@ class _GameScreenState extends State<GameScreen> {
 
     if (mounted) {
       setState(() {
-        if (url != null && label != null) {
+        _customUrl = custom;
+        if (_customUrl.isNotEmpty) {
+          _currentUrl        = _customUrl;
+          _currentWorldLabel = 'Custom';
+        } else if (url != null && label != null) {
           _currentUrl        = url;
           _currentWorldLabel = label;
         }
@@ -270,6 +280,10 @@ class _GameScreenState extends State<GameScreen> {
         _afkRemaining = _afkSettings.durationSeconds;
         _activeTab = _activeTab.clamp(0, _visibleTools.length);
       });
+      if (_customUrl.isNotEmpty) {
+        _webViewController?.loadUrl(
+            urlRequest: URLRequest(url: WebUri(_customUrl)));
+      }
       _registerFeatures();
     }
   }
@@ -292,8 +306,10 @@ class _GameScreenState extends State<GameScreen> {
   void _registerFeatures() {
     FeatureRegistry.features.clear();
     FeatureRegistry.registerAll([
-      WorldSwitcherFeature(onWorldSelected: _onWorldSelected),
-      HiscoresFeature(),
+      if (_customUrl.isEmpty) ...[
+        WorldSwitcherFeature(onWorldSelected: _onWorldSelected),
+        HiscoresFeature(),
+      ],
       ZoomFeature(
         currentZoom   : _zoomFor(_activeToolId),
         onZoomChanged : _onZoomChanged,
@@ -305,18 +321,44 @@ class _GameScreenState extends State<GameScreen> {
       SettingsFeature(
         visibleIds: _visibleToolIds,
         onChanged : _onToolsChanged,
+        customUrl : _customUrl,
+        onCustomUrlChanged: _onCustomUrlChanged,
       ),
     ]);
   }
 
-  void _onWorldSelected(String url, String label) {
-    _saveLastWorld(url, label);
+  void _onCustomUrlChanged(String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('custom_server_url', url);
     setState(() {
+      _customUrl = url;
+      if (url.isNotEmpty) {
+        _currentUrl        = url;
+        _currentWorldLabel = 'Custom';
+      } else {
+        _currentUrl = prefs.getString('last_world_url') ??
+            'https://2004.lostcity.rs/client?world=2&detail=high&method=0';
+        _currentWorldLabel = prefs.getString('last_world_label') ?? 'W2 HD';
+      }
+      _activeTab = _activeTab.clamp(0, _visibleTools.length);
+      _pageLoading = true;
+    });
+    _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(_currentUrl)));
+    _registerFeatures();
+  }
+
+  void _onWorldSelected(String url, String label) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('custom_server_url');
+    await _saveLastWorld(url, label);
+    setState(() {
+      _customUrl         = '';
       _currentUrl        = url;
       _currentWorldLabel = label;
       _pageLoading       = true;
     });
     _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    _registerFeatures();
   }
 
   void _onZoomChanged(double zoom) async {
@@ -614,7 +656,12 @@ class _GameScreenState extends State<GameScreen> {
                     verticalScrollBarEnabled        : false,
                     userAgent: 'Mozilla/5.0 (Linux; Android 11; Mobile) LostHQClient/1.0',
                   ),
-                  onWebViewCreated: (c) => _webViewController = c,
+                  onWebViewCreated: (c) {
+                    _webViewController = c;
+                    if (_customUrl.isNotEmpty) {
+                      c.loadUrl(urlRequest: URLRequest(url: WebUri(_customUrl)));
+                    }
+                  },
                   onLoadStart: (c, url) {
                     _loadGen++;
                     c.evaluateJavascript(source: 'window._lkReady = false;');
